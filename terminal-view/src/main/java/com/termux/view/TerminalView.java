@@ -637,10 +637,47 @@ public final class TerminalView extends View {
         return true;
     }
 
+    /** Keep the original event (including displayId and all metadata) for client hooks. */
+    private static int normalizePhysicalEscapeKeyCode(int keyCode, KeyEvent event) {
+        // Observed raw Linux KEY_ESC (scan 1) reaching this view as Android GRAVE or BACK.
+        // Real GRAVE is scan 41. Do not reinterpret text commits or Fn KCM fallbacks.
+        if ((keyCode == KeyEvent.KEYCODE_GRAVE || keyCode == KeyEvent.KEYCODE_BACK)
+            && event.getScanCode() == 1
+            && event.getDeviceId() > KEY_EVENT_SOURCE_SOFT_KEYBOARD
+            && event.isFromSource(InputDevice.SOURCE_KEYBOARD)
+            && (event.getFlags() & KeyEvent.FLAG_SOFT_KEYBOARD) == 0
+            && !event.isFunctionPressed()
+            && (event.getAction() == KeyEvent.ACTION_DOWN || event.getAction() == KeyEvent.ACTION_UP)) {
+            return KeyEvent.KEYCODE_ESCAPE;
+        }
+        return keyCode;
+    }
+
+    private static boolean isPhysicalBackEscape(int keyCode, KeyEvent event) {
+        // Pre-IME already canonicalizes the argument, but the untouched event is still BACK
+        // (and isSystem() remains true). Exempt only this proven physical alias, not real Back.
+        return keyCode == KeyEvent.KEYCODE_ESCAPE && event.getKeyCode() == KeyEvent.KEYCODE_BACK
+            && normalizePhysicalEscapeKeyCode(event.getKeyCode(), event) == KeyEvent.KEYCODE_ESCAPE;
+    }
+
     @Override
     public boolean onKeyPreIme(int keyCode, KeyEvent event) {
+        keyCode = normalizePhysicalEscapeKeyCode(keyCode, event);
         if (TERMINAL_VIEW_KEY_LOGGING_ENABLED)
             mClient.logInfo(LOG_TAG, "onKeyPreIme(keyCode=" + keyCode + ", event=" + event + ")");
+        // Route physical Escape before an IME can consume it as a dismiss/back action.
+        // Keep virtual/soft-keyboard events on their existing input path.
+        if (keyCode == KeyEvent.KEYCODE_ESCAPE
+            && event.getDeviceId() > KEY_EVENT_SOURCE_SOFT_KEYBOARD
+            && event.isFromSource(InputDevice.SOURCE_KEYBOARD)
+            && (event.getFlags() & KeyEvent.FLAG_SOFT_KEYBOARD) == 0) {
+            switch (event.getAction()) {
+                case KeyEvent.ACTION_DOWN:
+                    return onKeyDown(keyCode, event);
+                case KeyEvent.ACTION_UP:
+                    return onKeyUp(keyCode, event);
+            }
+        }
         if (keyCode == KeyEvent.KEYCODE_BACK) {
             cancelRequestAutoFill();
             if (isSelectingText()) {
@@ -762,6 +799,7 @@ public final class TerminalView extends View {
      */
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
+        keyCode = normalizePhysicalEscapeKeyCode(keyCode, event);
         if (TERMINAL_VIEW_KEY_LOGGING_ENABLED)
             mClient.logInfo(LOG_TAG, "onKeyDown(keyCode=" + keyCode + ", isSystem()=" + event.isSystem() + ", event=" + event + ")");
         if (mEmulator == null) return true;
@@ -772,7 +810,8 @@ public final class TerminalView extends View {
         if (mClient.onKeyDown(keyCode, event, mTermSession)) {
             invalidate();
             return true;
-        } else if (event.isSystem() && (!mClient.shouldBackButtonBeMappedToEscape() || keyCode != KeyEvent.KEYCODE_BACK)) {
+        } else if (event.isSystem() && !isPhysicalBackEscape(keyCode, event)
+            && (!mClient.shouldBackButtonBeMappedToEscape() || keyCode != KeyEvent.KEYCODE_BACK)) {
             return super.onKeyDown(keyCode, event);
         } else if (event.getAction() == KeyEvent.ACTION_MULTIPLE && keyCode == KeyEvent.KEYCODE_UNKNOWN) {
             mTermSession.write(event.getCharacters());
@@ -948,6 +987,7 @@ public final class TerminalView extends View {
      */
     @Override
     public boolean onKeyUp(int keyCode, KeyEvent event) {
+        keyCode = normalizePhysicalEscapeKeyCode(keyCode, event);
         if (TERMINAL_VIEW_KEY_LOGGING_ENABLED)
             mClient.logInfo(LOG_TAG, "onKeyUp(keyCode=" + keyCode + ", event=" + event + ")");
 
@@ -958,7 +998,7 @@ public final class TerminalView extends View {
         if (mClient.onKeyUp(keyCode, event)) {
             invalidate();
             return true;
-        } else if (event.isSystem()) {
+        } else if (event.isSystem() && !isPhysicalBackEscape(keyCode, event)) {
             // Let system key events through.
             return super.onKeyUp(keyCode, event);
         }
