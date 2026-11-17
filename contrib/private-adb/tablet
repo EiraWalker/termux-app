@@ -1,0 +1,56 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# Unified public CLI. Existing APK/bootstrap and shell-hook paths stay unchanged.
+set -eu
+BIN=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
+usage() {
+    cat <<'HELP'
+平板调试统一入口：tablet
+
+日常自动看护：
+  tablet start                    启动已配置的自动看护
+  tablet status                   查看最近状态和心跳快照（不是实时连接检测）
+  tablet stop                     持久停用自动恢复，不停止现有调试服务
+  tablet enable                   打开明确重新启用的确认框
+
+底层维护（需要可用的系统本机无线调试通道）：
+  tablet daemon start [连接端口]
+  tablet daemon status [连接端口]
+  tablet daemon restart [连接端口]
+  tablet daemon stop [连接端口]
+  tablet daemon ensure            非交互幂等尝试启动
+  tablet pair <配对端口>           本机重新配对；配对端口不是连接端口
+  tablet help
+
+Important: tablet stop does NOT stop the existing private shell daemon.
+底层服务停止后，若自动看护未停用，仍会被重新拉起。
+手动 Stop 后使用 tablet enable 并在平板确认；start 不会清除停用/故障锁存。
+HELP
+}
+bad() { usage >&2; exit 2; }
+[ "$#" -gt 0 ] || { usage; exit 0; }
+case "$1" in
+    start|status|stop|enable)
+        [ "$#" -eq 1 ] || bad
+        exec "$BIN/tablet-guardian" "$1"
+        ;;
+    daemon)
+        shift
+        [ "$#" -gt 0 ] || bad
+        case "$1" in
+            start|status|restart|stop) [ "$#" -le 2 ] || bad ;;
+            pair) [ "$#" -eq 2 ] || bad ;;
+            ensure|help) [ "$#" -eq 1 ] || bad ;;
+            *) bad ;;
+        esac
+        exec "$BIN/tablet-daemon" "$@"
+        ;;
+    pair)
+        [ "$#" -eq 2 ] || bad
+        exec "$BIN/tablet-daemon" pair "$2"
+        ;;
+    help|-h|--help)
+        [ "$#" -eq 1 ] || bad
+        usage
+        ;;
+    *) bad ;;
+esac

@@ -280,12 +280,24 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
     }
 
     @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        if (com.termux.app.privateadb.AutostartEntry.ENABLE.equals(intent.getAction())) {
+            Intent previous = getIntent();
+            setIntent(intent);
+            com.termux.app.privateadb.AutostartEntry.onActivityStart(this);
+            setIntent(previous);
+        }
+    }
+
+    @Override
     public void onStart() {
         super.onStart();
 
         Logger.logDebug(LOG_TAG, "onStart");
 
         if (mIsInvalidState) return;
+        com.termux.app.privateadb.AutostartEntry.onActivityStart(this);
 
         mIsVisible = true;
 

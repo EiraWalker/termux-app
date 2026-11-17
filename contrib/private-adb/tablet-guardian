@@ -1,0 +1,45 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# Control only the existing Termux private-recovery component.
+set -eu
+APP=/data/data/com.termux
+AM="$APP/files/usr/bin/am"
+SERVICE=com.termux/.app.privateadb.PrivateAdbService
+[ "$(id -u)" = "$(stat -c %u "$APP")" ] || {
+    echo 'Run this command inside the existing Termux app.' >&2
+    exit 2
+}
+[ "$#" -le 1 ] || { echo 'Usage: tablet-guardian start|status|stop|enable' >&2; exit 2; }
+case "${1:-status}" in
+    start)
+        # Honors config disabled, persistent Stop, and safety pause.
+        exec "$AM" startservice --user 0 -n "$SERVICE"
+        ;;
+    stop)
+        # Disables automatic recovery, but leaves the private shell daemon alone.
+        exec "$AM" startservice --user 0 -n "$SERVICE" -a com.termux.action.PRIVATE_ADB_AUTOSTART_STOP
+        ;;
+    enable)
+        # Opens confirmation; does not silently clear a user's persistent Stop.
+        exec "$AM" start --user 0 -n com.termux/.app.TermuxActivity -a com.termux.action.PRIVATE_ADB_AUTOSTART_ENABLE
+        ;;
+    status)
+        PREFS="$APP/shared_prefs/private_adb_autostart.xml"
+        echo 'Last recorded guardian state (not a connectivity probe):'
+        if [ -f "$PREFS" ]; then
+            grep -E 'name="(phase|userStopped|safetyPaused)"' "$PREFS" || :
+        else
+            echo 'No guardian state yet.'
+        fi
+        echo 'Recent manager heartbeat (snapshot):'
+        HEALTH="$APP/files/home/.config/tablet-daemon/health.json"
+        if [ -f "$HEALTH" ]; then cat "$HEALTH"; else echo 'No heartbeat yet.'; fi
+        ;;
+    help|-h|--help)
+        echo 'tablet-guardian start  : request configured guardian startup'
+        echo 'tablet-guardian status : show last state and heartbeat snapshots'
+        echo 'tablet-guardian stop   : persistently disable automatic recovery only'
+        echo 'tablet-guardian enable : open explicit re-enable confirmation'
+        echo 'If start stays disabled, use enable and confirm on the tablet.'
+        ;;
+    *) echo 'Usage: tablet-guardian start|status|stop|enable' >&2; exit 2 ;;
+esac

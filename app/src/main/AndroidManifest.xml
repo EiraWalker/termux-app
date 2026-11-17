@@ -193,6 +193,15 @@
             android:exported="false" />
 
 
+        <service android:name=".app.privateadb.PrivateAdbService" android:exported="false" />
+        <receiver android:name=".app.privateadb.AutostartReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.USER_UNLOCKED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
         <service
             android:name=".app.TermuxService"
             android:exported="false" />
