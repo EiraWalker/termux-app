@@ -7,7 +7,7 @@ import java.nio.charset.StandardCharsets;
 
 /** No commands, addresses, keys or arbitrary paths are accepted from Intent extras. */
 public final class AutostartConfig {
-    public static final String MANAGER = "/data/data/com.termux/files/usr/bin/tablet-daemon";
+    public static final String MANAGER = "/data/data/com.termux/files/usr/bin/private-adbd";
     public static final String HEARTBEAT = "/data/data/com.termux/files/home/.config/tablet-daemon/health.json";
     public final String expectedSerial;
     private AutostartConfig(String serial) { expectedSerial = serial; }

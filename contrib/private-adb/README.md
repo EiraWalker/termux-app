@@ -19,7 +19,7 @@ configured private shell manager. The private daemon core is maintained at
 These two shell files are **not a complete, ready-to-deploy distribution**.
 They require the matching Termux extension, the existing Termux `am` wrapper,
 POSIX shell/core utilities, and a separately provisioned, device-appropriate
-`$PREFIX/bin/tablet-daemon` backend and private shell manager. That backend must
+`$PREFIX/bin/private-adbd` backend and private shell manager. That backend must
 validate local device identity and authenticated UID 2000, implement its
 start/status/restart/stop/pair/ensure contract, and publish the compatible
 heartbeat safely. The previously deployed device-specific bridge and manager
@@ -56,8 +56,17 @@ App configuration is read from
 does not enable recovery. The code requires numeric `version: 1`, boolean
 `enabled: true`, a verified `expectedSerial`, and these exact fixed values:
 
-- `managerPath`: `/data/data/com.termux/files/usr/bin/tablet-daemon`
+- `managerPath`: `/data/data/com.termux/files/usr/bin/private-adbd`
 - `heartbeatPath`: `/data/data/com.termux/files/home/.config/tablet-daemon/health.json`
+
+Only the installed backend command is renamed to `private-adbd`; the public
+`tablet` router and `tablet-guardian` helper keep their names. The existing
+`$HOME/.config/tablet-daemon` state directory, heartbeat path and state format
+are intentionally retained so this command rename does not reset saved state.
+The updated APK, router, installed backend and configured `managerPath` must
+match. The updated APK rejects the legacy backend command path: there is no
+legacy alias or fallback. An old config stays disabled until an explicit managed
+migration updates its `managerPath` after provisioning the renamed backend.
 
 Provision this privately only after verifying the backend identity, pairing,
 permissions and real heartbeat writer. The deployed heartbeat contract uses an

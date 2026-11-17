@@ -42,11 +42,11 @@ case "$1" in
             ensure|help) [ "$#" -eq 1 ] || bad ;;
             *) bad ;;
         esac
-        exec "$BIN/tablet-daemon" "$@"
+        exec "$BIN/private-adbd" "$@"
         ;;
     pair)
         [ "$#" -eq 2 ] || bad
-        exec "$BIN/tablet-daemon" pair "$2"
+        exec "$BIN/private-adbd" pair "$2"
         ;;
     help|-h|--help)
         [ "$#" -eq 1 ] || bad

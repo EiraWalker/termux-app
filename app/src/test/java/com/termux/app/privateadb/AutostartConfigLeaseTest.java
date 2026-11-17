@@ -32,6 +32,22 @@ public class AutostartConfigLeaseTest {
         }
         assertNull(AutostartConfig.load(c));
     }
+    @Test public void configRequiresRenamedPrivateAdbdManagerAndRetainsStatePaths() throws Exception {
+        assertEquals("/data/data/com.termux/files/usr/bin/private-adbd", AutostartConfig.MANAGER);
+        assertEquals("test-serial", AutostartConfig.parse(valid().put("managerPath",
+            "/data/data/com.termux/files/usr/bin/private-adbd").toString()).expectedSerial);
+        assertEquals("/data/data/com.termux/files/home/.config/tablet-daemon/health.json", AutostartConfig.HEARTBEAT);
+        assertEquals(new java.io.File(c.getFilesDir(), "home/.config/tablet-daemon"), AutostartConfig.directory(c));
+    }
+    @Test public void configRejectsLegacyManagerUntilExplicitManagedMigration() throws Exception {
+        try {
+            AutostartConfig.parse(valid().put("managerPath",
+                "/data/data/com.termux/files/usr/bin/tablet-daemon").toString());
+            fail("legacy manager path must not be accepted as an alias");
+        } catch (java.io.IOException expected) {
+            assertEquals("config_disabled_or_invalid", expected.getMessage());
+        }
+    }
     @Test public void neverAdoptsExistingUserNativeWindow() {
         Settings.Global.putInt(c.getContentResolver(), "adb_wifi_enabled", 1);
         assertFalse(NativeWindow.open(c, BOOT, 45000));
