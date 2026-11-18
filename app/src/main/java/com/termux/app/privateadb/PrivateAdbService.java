@@ -28,6 +28,7 @@ public final class PrivateAdbService extends Service {
     private long nextAttempt;
     private int failures;
     private boolean scheduled;
+    private MaintenanceSocket maintenanceSocket;
 
     static boolean unlocked(Context c) {
         return Build.VERSION.SDK_INT < 24 || ((UserManager)c.getSystemService(USER_SERVICE)).isUserUnlocked();
@@ -48,6 +49,7 @@ public final class PrivateAdbService extends Service {
     }
     @Override public void onCreate() {
         super.onCreate();
+        MaintenanceCoordinator.forgetAcknowledgement();
         NotificationManager nm = (NotificationManager)getSystemService(NOTIFICATION_SERVICE);
         if (Build.VERSION.SDK_INT >= 26) nm.createNotificationChannel(new NotificationChannel(CHANNEL,
             "Private ADB recovery", NotificationManager.IMPORTANCE_LOW));
@@ -58,27 +60,37 @@ public final class PrivateAdbService extends Service {
         startForeground(8103, builder.setSmallIcon(R.mipmap.ic_launcher).setContentTitle("Private ADB recovery")
             .setContentText("Monitoring local heartbeat; Stop disables automatic recovery")
             .setOngoing(true).addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", stop).build());
+        try { maintenanceSocket = new MaintenanceSocket(this); }
+        catch (IOException | RuntimeException unavailable) { /* Endpoint conflict/SELinux fails closed, no fallback. */ }
     }
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && STOP.equals(intent.getAction())) {
             getSharedPreferences(PREFS, 0).edit().putBoolean("userStopped", true).commit();
             stopping = true;
             abort();
-            worker.execute(() -> { NativeWindow.close(this); phase(this, "user_stopped"); stopSelf(); });
+            // Do not put the main-thread Stop behind an IPC/status Binder or store lock.
+            worker.execute(() -> {
+                NativeWindow.close(this);
+                MaintenanceCoordinator.suppresses(this); // Persist revocation after safety cleanup.
+                phase(this, "user_stopped"); stopSelf();
+            });
             return START_NOT_STICKY;
         }
         if (!scheduled) {
             scheduled = true;
             worker.scheduleWithFixedDelay(this::tickSafely, 0, 15, TimeUnit.SECONDS);
-        }
+        } else worker.execute(this::tickSafely);
         return START_STICKY;
     }
     private void tickSafely() {
         try { tick(); } catch (Exception e) { phase(this, "monitor_error"); }
+        finally { MaintenanceCoordinator.workerCheckpoint(this, process == null && discovery == null, () -> !stopping); }
     }
     private void tick() throws Exception {
-        // Sticky reconstruction closes a previous owned window before doing anything else.
-        if (NativeWindow.owned(this) && !NativeWindow.close(this)) { phase(this, "cleanup_pending"); return; }
+        // The same serial worker drains recovery, closes only its own window, then acknowledges.
+        String maintenance = MaintenanceCoordinator.workerCheckpoint(this, process == null && discovery == null, () -> !stopping);
+        if ("cleanup_pending".equals(maintenance) || "store_error".equals(maintenance) ||
+            "draining".equals(maintenance) || MaintenanceCoordinator.suppresses(this)) return;
         if (stopping || !enabled(this)) { phase(this, "disabled"); stopSelf(); return; }
         if (getSharedPreferences(PREFS, 0).getBoolean("safetyPaused", false)) { phase(this, "safety_paused"); return; }
         AutostartConfig config = AutostartConfig.load(this);
@@ -90,12 +102,10 @@ public final class PrivateAdbService extends Service {
             nextAttempt = Math.max(nextAttempt, state.getLong("nextAttemptElapsedMs", 0));
             failures = Math.max(failures, state.getInt("failures", 0));
         }
-        boolean healthy = false;
-        try {
-            JSONObject h = new JSONObject(AutostartConfig.read(new File(AutostartConfig.directory(this), "health.json")));
-            healthy = AutostartPolicy.healthy(h.getInt("version"), h.getString("boot_id"), boot,
-                h.getLong("uptime_ms"), SystemClock.elapsedRealtime(), h.getLong("watch_pid"), h.getLong("child_pid"), h.getString("state"));
-        } catch (Exception ignored) {}
+        boolean healthy = freshHealth(boot);
+        boolean maintenancePending = MaintenanceCoordinator.suppresses(this);
+        if (stopping || maintenancePending || state.getBoolean("userStopped", false) ||
+            state.getBoolean("safetyPaused", false)) return;
         if (healthy) {
             phase(this, "healthy"); failures = 0;
             state.edit().putInt("failures", 0).apply(); return;
@@ -113,6 +123,25 @@ public final class PrivateAdbService extends Service {
             state.edit().putLong("nextAttemptElapsedMs", nextAttempt).commit();
         }
     }
+    private boolean freshHealth(String boot) {
+        try {
+            JSONObject h = new JSONObject(AutostartConfig.read(new File(AutostartConfig.directory(this), "health.json")));
+            return AutostartPolicy.healthy(h.getInt("version"), h.getString("boot_id"), boot,
+                h.getLong("uptime_ms"), SystemClock.elapsedRealtime(), h.getLong("watch_pid"), h.getLong("child_pid"), h.getString("state"));
+        } catch (Exception ignored) { return false; }
+    }
+    boolean recoveryAllowed(String boot, long deadline) {
+        boolean healthy = freshHealth(boot);
+        // Config/store/health reads may be slow: Stop, safety and time are checked last.
+        boolean configured = enabled(this);
+        boolean maintenance = MaintenanceCoordinator.suppresses(this);
+        if (stopping || !configured || maintenance ||
+            getSharedPreferences(PREFS, 0).getBoolean("userStopped", false) ||
+            getSharedPreferences(PREFS, 0).getBoolean("safetyPaused", false) ||
+            SystemClock.elapsedRealtime() >= deadline) return false;
+        if (healthy) { phase(this, "health_recovered"); return false; }
+        return true;
+    }
     private boolean wifi() {
         ConnectivityManager cm = (ConnectivityManager)getSystemService(CONNECTIVITY_SERVICE);
         for (Network n : cm.getAllNetworks()) {
@@ -127,19 +156,22 @@ public final class PrivateAdbService extends Service {
     }
     private void recover(AutostartConfig config, String boot) throws Exception {
         long deadline = SystemClock.elapsedRealtime() + AutostartPolicy.WINDOW_MS;
+        if (!recoveryAllowed(boot, deadline)) return;
         Discovery d = new Discovery(config.expectedSerial, deadline);
         discovery = d;
         PowerManager.WakeLock lock = ((PowerManager)getSystemService(POWER_SERVICE)).newWakeLock(
             PowerManager.PARTIAL_WAKE_LOCK, "Termux:PrivateAdbWindow");
         lock.acquire(50000);
         try {
-            if (stopping || !NativeWindow.open(this, boot, deadline)) { phase(this, "native_busy_or_denied"); return; }
+            if (!recoveryAllowed(boot, deadline)) return;
+            if (!NativeWindow.open(this, boot, deadline)) { phase(this, "native_busy_or_denied"); return; }
+            if (!recoveryAllowed(boot, deadline)) return;
             phase(this, "discovering");
             main.post(d::start);
             int attempts = 0;
             getSharedPreferences(PREFS, 0).edit().putInt("lastCandidatePort", 0).putInt("attempts", 0).apply();
             long settled = Math.min(deadline, SystemClock.elapsedRealtime() + NsdRecoveryPolicy.SETTLE_MS);
-            while (!stopping && enabled(this) && !d.closed.get() && SystemClock.elapsedRealtime() < deadline) {
+            while (!d.closed.get() && recoveryAllowed(boot, deadline)) {
                 if (SystemClock.elapsedRealtime() < settled) { Thread.sleep(100); continue; }
                 Integer port = d.candidates.next(SystemClock.elapsedRealtime());
                 if (port == null) { Thread.sleep(100); continue; }
@@ -156,25 +188,35 @@ public final class PrivateAdbService extends Service {
                 pb.directory(new File(getFilesDir(), "home"));
                 // Never store raw wrapper output (may contain device identifiers or secrets).
                 pb.redirectOutput(new File("/dev/null")); pb.redirectError(new File("/dev/null"));
+                boolean dispatched = false;
+                if (!recoveryAllowed(boot, deadline) || !MaintenanceCoordinator.reserveGuardianDispatch(this, boot)) return;
                 try {
-                    if (stopping || !enabled(this) || d.closed.get() || SystemClock.elapsedRealtime() >= deadline) return;
-                    Process p = pb.start(); process = p; p.getOutputStream().close();
+                    if (d.closed.get() || !recoveryAllowed(boot, deadline)) return;
+                    Process p = pb.start(); process = p; dispatched = true; p.getOutputStream().close();
                     Integer code = null;
-                    while (!stopping && enabled(this) && SystemClock.elapsedRealtime() < deadline) {
+                    // A maintenance request cancels discovery but never kills an already dispatched
+                    // wrapper. Wait for its real exit or the original bounded recovery deadline.
+                    while (!stopping && enabled(this) &&
+                        !getSharedPreferences(PREFS, 0).getBoolean("safetyPaused", false) &&
+                        SystemClock.elapsedRealtime() < deadline) {
                         try { code = p.exitValue(); break; }
                         catch (IllegalThreadStateException running) { Thread.sleep(100); }
                     }
                     if (code == null) { phase(this, "bootstrap_timeout"); return; }
+                    MaintenanceCoordinator.confirmGuardianDispatch(this);
                     if (code == 2) {
                         getSharedPreferences(PREFS, 0).edit().putBoolean("safetyPaused", true).commit();
                         phase(this, "safety_paused");
                     } else phase(this, code == 0 ? "bootstrap_returned" : "candidate_failed");
                     if (d.candidates.finished(code)) return;
                 } catch (IOException failed) { phase(this, "candidate_failed"); }
-                finally { abortProcess(); }
+                finally {
+                    if (!dispatched) MaintenanceCoordinator.confirmGuardianDispatch(this);
+                    abortProcess();
+                }
                 // Failed or stale observed ports do not consume the remainder of the window.
             }
-            phase(this, "discovery_timeout");
+            if (SystemClock.elapsedRealtime() >= deadline) phase(this, "discovery_timeout");
         } finally {
             abortProcess();
             d.close(); discovery = null;
@@ -188,7 +230,10 @@ public final class PrivateAdbService extends Service {
     }
     private void abort() { abortProcess(); Discovery d = discovery; if (d != null) d.close(); }
     @Override public void onDestroy() {
-        stopping = true; abort(); worker.shutdownNow();
+        stopping = true;
+        MaintenanceCoordinator.forgetAcknowledgement();
+        abort(); worker.shutdownNow();
+        if (maintenanceSocket != null) maintenanceSocket.close();
         NativeWindow.close(this); super.onDestroy();
     }
     @Override public void onTaskRemoved(Intent rootIntent) {

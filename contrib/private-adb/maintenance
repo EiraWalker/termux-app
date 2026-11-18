@@ -1,0 +1,39 @@
+#!/system/bin/sh
+# Same-UID caller only. Token-bearing JSON is stdin, never an argv or a shell expression.
+# No environment overrides, configurable package, classpath, URI or executable paths.
+error() {
+    printf '{"version":1,"error":"%s"}\n' "$2"
+    exit "$1"
+}
+[ "$#" -eq 1 ] || error 2 invalid_request
+case "$1" in request|status|release) ;; *) error 2 invalid_request ;; esac
+[ -x /system/bin/pm ] && [ -x /system/bin/app_process ] || error 3 unsupported
+
+# Only a single package-manager-reported base APK is supported by this helper.
+# Split/multiline results fail closed; no APK path can be supplied by the caller.
+package_path=$(/system/bin/pm path com.termux 2>/dev/null) || error 3 unsupported
+case "$package_path" in
+    *'
+'*) error 3 unsupported ;;
+    package:/data/app/*/base.apk) ;;
+    *) error 3 unsupported ;;
+esac
+apk=${package_path#package:}
+case "$apk" in *:*) error 3 unsupported ;; esac
+[ -r "$apk" ] || error 3 unsupported
+
+# Capture stderr rather than exposing framework diagnostics; stdout is only the API result.
+# An old APK without MaintenanceCli exits before it can return our unsupported envelope.
+result=$(CLASSPATH="$apk" /system/bin/app_process /system/bin \
+    com.termux.app.privateadb.MaintenanceCli "$1" 2>/dev/null)
+code=$?
+case "$code" in
+    0) [ -n "$result" ] || error 3 unsupported
+       printf '%s\n' "$result" ;;
+    2) error 2 invalid_request ;;
+    3) error 3 unsupported ;;
+    *) case "$result" in
+           '{"version":1,"error":"failed"}') error 1 failed ;;
+           *) error 3 unsupported ;;
+       esac ;;
+esac
